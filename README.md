@@ -1,89 +1,176 @@
-# Cursor → Obsidian 迁移包
+# Cursor → Obsidian Knowledge Base
 
-把 Cursor 的历史对话导出成 Markdown，再提炼成带双链的 Obsidian 笔记。纯 Python 标准库，无第三方依赖。
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#requirements)
+[![Obsidian](https://img.shields.io/badge/works%20with-Obsidian-7c3aed)](https://obsidian.md/)
 
-## 文件清单（7 个，约 45 KB）
+Turn **Cursor's local chat history** into a searchable **Obsidian knowledge base** — one Markdown file per conversation, plus AI-distilled notes with YAML frontmatter, callouts and `[[wikilinks]]`.
+
+Cursor keeps every conversation in a local SQLite database and offers no bulk export. This toolkit reads that database directly (on a copy, read-only), reconstructs each conversation, and builds a two-layer vault: a complete **raw archive** for traceability, and a **distilled layer** you actually read.
+
+Works on Windows, macOS and Linux. Pure Python standard library — nothing to `pip install`.
+
+## Why two layers
+
+| Layer | Folder | Purpose |
+|---|---|---|
+| Raw archive | `Raw/CursorChat/` | Full transcript, verbatim. For tracing a decision back to its source. |
+| Knowledge layer | `AI对话记录/` | One note per conversation: summary, key implementation, pitfalls, TODOs. |
+| Navigation | `项目/` | One hub per project: timeline of every conversation in that project. |
+
+Dumping raw transcripts straight into Obsidian pollutes the graph with retry loops, tool-call noise and empty chatter. Keeping the raw text one click away — every note carries a `raw:` backlink in its frontmatter — preserves traceability without the clutter.
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    DB[(state.vscdb<br/>SQLite, WAL)] -->|"1 snapshot<br/>read-only copy"| EX[export_cursor_chats.py]
+    EX -->|"2 one .md per chat"| RAW[Raw/CursorChat/]
+    RAW -->|"3 build_groups.py"| GRP[group_XX.json<br/>task manifests]
+    GRP -->|"4 LLM + TEMPLATE.md"| NOTE[AI对话记录/]
+    NOTE -->|"5 verify / fix / hubs"| HUB[项目/]
+    HUB -->|"6 sync_to_vault.py"| VAULT[(Obsidian Vault)]
+```
+
+Step 4 is the only step that needs a model — deciding what is noise, what is a conclusion, and what caused an error cannot be scripted. Everything else is deterministic.
+
+## Vault layout
 
 ```
-cursor-kb/
-├─ export_cursor_chats.py      # ① 导出原文（403 行）
-├─ _batch/
-│   ├─ TEMPLATE.md             # ② 提炼规范（给 AI 读的提示词，不是代码）
-│   ├─ build_groups.py         # ③ 切分任务批次
-│   ├─ verify.py               # ④ 双链闭合体检
-│   ├─ fix_projects.py         # ⑤ 项目名归并
-│   ├─ make_hubs.py            # ⑥ 生成项目主页
-│   └─ sync_to_vault.py        # ⑦ 拷进 Vault
-└─ README.md                   # 本文件
+MyVault/
+├─ Cursor 对话知识库.md          ← generated home page, links every hub
+├─ Raw/
+│  └─ CursorChat/                ← layer 1: verbatim archive
+│     ├─ _index.md               ←   table: date / title / project / messages / chars
+│     └─ 2026-09-03 Celery usage in project -594806de.md
+├─ AI对话记录/                    ← layer 2: distilled notes, one per conversation
+│  ├─ 2026-09-03 Celery 任务台账与队列治理 -594806de.md
+│  └─ …
+└─ 项目/                         ← layer 3: project hubs
+   ├─ wms_be.md                  ←   overview + timeline + tag distribution
+   └─ …
 ```
 
-## 前置条件
+Filenames are `YYYY-MM-DD <topic> -<id8>.md`. The 8-hex-char suffix keeps names unique when several chats on the same day share a title, and the format deliberately avoids `[ ] | # : ? *` so `[[wikilinks]]` never break.
 
-| 项 | 要求 |
+A distilled note:
+
+```markdown
+---
+date: 2026-09-03
+project: wms_be
+type: ai-对话笔记
+tags: [cursor-ai, 技术笔记, Celery, Django]
+source: cursor
+raw: "[[2026-09-03 Celery usage in project -594806de]]"
+session_id: 594806de-be39-46c2-a22c-0e0beaf23c43
+messages: 13
+tool_calls: 61
+---
+
+# Celery 在 wms_be 的落地：任务台账 + 队列治理
+
+> [!summary] 核心结论
+> …
+
+## 关键内容
+## ⚠️ 踩坑与注意事项
+## 📌 待办 / 后续
+## 🔗 关联
+- 原始对话：[[2026-09-03 Celery usage in project -594806de]]
+```
+
+## Quick start
+
+```bash
+git clone git@github.com:PF-UI/cursor-kb.git
+cd cursor-kb
+
+python export_cursor_chats.py --stats                            # 1. how many chats do I have?
+python export_cursor_chats.py --out "D:/MyVault/Raw/CursorChat"  # 2. export the raw layer
+python _batch/build_groups.py                                    # 3. slice into task batches
+
+# 4. hand each _batch/group_XX.json to your AI of choice, with _batch/TEMPLATE.md
+#    as the writing spec — it writes one note per chat into AI对话记录/
+
+python _batch/verify.py                                          # 5. link-integrity check
+python _batch/fix_projects.py                                    #    normalise project names
+python _batch/make_hubs.py                                       #    build project hubs
+python _batch/sync_to_vault.py --vault "D:/MyVault"              # 6. copy into the vault
+```
+
+Every script accepts `--base <kb-dir>` (defaults to its own directory), so the folder can live anywhere.
+
+## Requirements
+
+- **Python 3.10+** (uses `X | None` annotations). No third-party packages.
+- **Cursor installed with existing chat history** — that database is the only data source.
+- An **Obsidian vault** (an empty folder is fine).
+
+Cursor's database is auto-detected:
+
+| OS | Path |
 |---|---|
-| Python | **3.10+**（脚本用了 `X \| None` 类型标注） |
-| Cursor | 目标机器**必须装过 Cursor 且有对话记录**，否则没有数据源 |
-| Obsidian | 一个已有的 Vault 目录（不存在就先用 Obsidian 建一个） |
+| Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` |
+| macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
+| Linux | `~/.config/Cursor/User/globalStorage/state.vscdb` |
 
-Cursor 数据库位置（脚本自动识别，无需配置）：
+Override with `--cursor-db "<path>"` when Cursor lives elsewhere.
 
-- Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`
-- macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
-- Linux `~/.config/Cursor/User/globalStorage/state.vscdb`
+## Scripts
 
-位置特殊时用 `--cursor-db "完整路径"` 覆盖。
+| File | Role | Key options |
+|---|---|---|
+| `export_cursor_chats.py` | Snapshot the DB, write one `.md` per conversation | `--stats`, `--out`, `--min-chars`, `--clean`, `--cursor-db` |
+| `_batch/TEMPLATE.md` | Writing spec handed to the model (frontmatter, callouts, red lines) | — |
+| `_batch/build_groups.py` | Greedy bin-packing into task manifests | `--cap-chars`, `--max-batch` |
+| `_batch/verify.py` | Assert a 1:1 mapping between raw files and notes, check frontmatter | `--base` |
+| `_batch/fix_projects.py` | Merge path-derived fake project names, rewrite links | `--dry-run` |
+| `_batch/make_hubs.py` | Generate project hub notes | `--base` |
+| `_batch/sync_to_vault.py` | Copy layers into the vault, write the home page | `--vault`, `--dry-run` |
 
-## 五步跑完
+## How the export works
+
+Cursor keeps conversation headers in `composerHeaders` and everything else in a generic `cursorDiskKV` table (`composerData:<id>` holds the ordered bubble list, `bubbleId:<chat>:<msg>` holds each message). The exporter:
+
+1. copies `state.vscdb` + `-wal` + `-shm` next to the script and opens it `mode=ro`, so the running editor is never locked;
+2. walks `fullConversationHeadersOnly[]` to preserve true message order;
+3. keeps user and assistant text, collapsing every tool call into a single `> 🛠 name · path=… · status` line — this is what keeps a 10,000-message runaway agent loop from becoming a 20 MB file;
+4. resolves the project name from `workspaceStorage/*/workspace.json`, then `trackedGitRepos`, then the most common path segment of the touched files (old chats often point at workspaces that no longer exist);
+5. skips drafts and empty chats via `--min-chars`.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `Cursor database not found` | Cursor never ran here; pass `--cursor-db` |
+| Exported chats look empty | `state.vscdb` holds many empty draft composers — `--min-chars` filters them |
+| Mojibake in the console | `chcp 65001` (or `[Console]::OutputEncoding=[Text.Encoding]::UTF8`) plus `PYTHONIOENCODING=utf-8` |
+| `verify.py` reports missing notes | a note is unwritten, or the 8-char id in its `raw:` link is wrong |
+| Wikilinks don't resolve | filenames contain `[ ] \| # : ? *` — this toolkit's naming avoids them |
+
+## 中文说明
+
+把 Cursor 的历史对话导出成 Markdown，再提炼成带双链的 Obsidian 笔记。纯 Python 标准库，零第三方依赖。
+
+**核心取舍**：原文层与知识层分离。原文完整保留（含工具调用轨迹）只做溯源；知识层只留结论、关键实现、踩坑和待办，避免把反复试错和闲聊灌进笔记图谱。
 
 ```powershell
-# 0. 把整个 cursor-kb 目录放到任意位置，例如 D:\work\cursor-kb，然后 cd 进去
-
-# 1. 先看统计（不写文件）：确认会话数量与体量
 python export_cursor_chats.py --stats
-
-# 2. 导出原文层 → 直接写进 Vault 的 Raw 目录
 python export_cursor_chats.py --out "D:\MyVault\Raw\CursorChat"
-
-# 3. 切分任务批次（产出 _batch\group_01.json ...）
 python _batch\build_groups.py
-
-# 4. 【唯一需要 AI 的一步】把每个 group_XX.json 交给 AI，
-#    让它按 _batch\TEMPLATE.md 的规范逐篇写成笔记，落到 AI对话记录\
-#    —— 用 Cursor / Claude / 任意 Agent 都行，提示词就是 TEMPLATE.md 的内容
-
-# 5. 校验 → 归并项目名 → 生成项目主页 → 同步进 Vault
+# 把 _batch\group_XX.json 交给 AI，按 _batch\TEMPLATE.md 写笔记到 AI对话记录\
 python _batch\verify.py
 python _batch\fix_projects.py
 python _batch\make_hubs.py
 python _batch\sync_to_vault.py --vault "D:\MyVault"
 ```
 
-所有脚本都接受 `--base "<知识库目录>"`，默认取脚本所在目录，所以整包放到哪都能跑。
+**关键参数**：`--min-chars 200` 过滤空草稿；`--clean` 导出后删除 1 GB 临时快照；`--vault` 也可用环境变量 `OBSIDIAN_VAULT`；`fix_projects.py` 与 `sync_to_vault.py` 支持 `--dry-run` 先演练。
 
-## 关键参数
+第 4 步是唯一无法脚本化的环节——判断“哪些是噪音、哪句是结论、这个报错的根因是什么”必须靠模型。
 
-| 脚本 | 参数 | 说明 |
-|---|---|---|
-| `export_cursor_chats.py` | `--min-chars 200` | 小于该长度的会话跳过（默认滤掉空草稿） |
-| | `--clean` | 导出后删除 1 GB 临时快照 |
-| | `--cursor-db` | 手动指定数据库路径 |
-| `build_groups.py` | `--cap-chars 150000` | 每组字符上限 |
-| | `--max-batch 6` | 每组最多几篇 |
-| `fix_projects.py` | `--dry-run` | 只看会改哪些，不落盘 |
-| `sync_to_vault.py` | `--vault` | Vault 根目录（也可用环境变量 `OBSIDIAN_VAULT`） |
-| | `--dry-run` | 只演练不拷贝 |
+## License
 
-## 排错
-
-| 现象 | 原因 / 解法 |
-|---|---|
-| `Cursor database not found` | Cursor 没装过、或没聊过天；用 `--cursor-db` 指定 |
-| 导出的对话确实很多但内容为空 | `state.vscdb` 里有大量空草稿 composer，`--min-chars` 会自动滤掉 |
-| 中文乱码 | PowerShell 里先执行 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`，并设 `$env:PYTHONIOENCODING='utf-8'` |
-| `verify.py` 报 missing | 某篇笔记还没写，或 `raw:` 双链里的 8 位 id 抄错了 |
-| Obsidian 里双链点不开 | 文件名不能含 `[ ] | # : ? *`，本包的命名规则已规避 |
-
-## 说明
-
-- 第 4 步是唯一无法脚本化的环节：判断「哪些是噪音、哪句是结论、这个报错的根因」需要模型。
-- 原文层与知识层分离的意义：原文可全文检索溯源，知识层只留可复用结论，图谱不被噪音污染。
+[MIT](LICENSE) © 2026 PF-UI
