@@ -1,0 +1,22 @@
+# 生成物 / 本地数据，不入库
+_snapshot/
+_testvault/
+Raw/
+AI对话记录/
+项目/
+group_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 打包
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
